@@ -445,8 +445,12 @@ function AttendanceView({ user, isAdmin }) {
 
   const calcHours = (clockIn, clockOut) => {
     if (!clockIn || !clockOut) return null;
-    const diff = (new Date(clockOut) - new Date(clockIn)) / 3600000;
-    return diff.toFixed(1);
+    const diffMs = new Date(clockOut) - new Date(clockIn);
+    if (diffMs < 0) return "0.0";
+    const diffMins = Math.floor(diffMs / 60000);
+    const hours = Math.floor(diffMins / 60);
+    const mins = diffMins % 60;
+    return (hours + mins / 60).toFixed(1);
   };
 
   const load = async () => {
@@ -469,9 +473,11 @@ function AttendanceView({ user, isAdmin }) {
 
   const clockIn = async () => {
     setSaving(true);
+    const now = new Date();
+    const localDate = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
     const { data } = await supabase.from("attendance").insert({
-      employee_name: user.name, date: today,
-      clock_in: new Date().toISOString(), nfc_code: nfcCode
+      employee_name: user.name, date: localDate,
+      clock_in: now.toISOString(), nfc_code: nfcCode
     }).select().single();
     setTodayRecord(data);
     await load();
