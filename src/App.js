@@ -426,6 +426,292 @@ function WeeklySummary({ tasks }) {
   );
 }
 
+// ─── ATTENDANCE MODULE ────────────────────────────────────────────────────────
+function AttendanceView({ user, isAdmin }) {
+  const [attendance, setAttendance] = useState([]);
+  const [todayRecord, setTodayRecord] = useState(null);
+  const [activeBreak, setActiveBreak] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [showSummaryModal, setShowSummaryModal] = useState(false);
+  const [dayNote, setDayNote] = useState("");
+  const [filterName, setFilterName] = useState("All");
+  const [nfcCode] = useState(() => Math.random().toString(36).substring(2, 8).toUpperCase());
+
+  const today = new Date().toISOString().split("T")[0];
+
+  const fmt = (ts) => ts ? new Date(ts).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "--:--";
+  const fmtDate = (d) => new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+
+  const calcHours = (clockIn, clockOut) => {
+    if (!clockIn || !clockOut) return null;
+    const diff = (new Date(clockOut) - new Date(clockIn)) / 3600000;
+    return diff.toFixed(1);
+  };
+
+  const load = async () => {
+    setLoading(true);
+    const query = isAdmin
+      ? supabase.from("attendance").select("*").order("created_at", { ascending: false })
+      : supabase.from("attendance").select("*").eq("employee_name", user.name).order("created_at", { ascending: false });
+    const { data } = await query;
+    setAttendance(data || []);
+    const rec = (data || []).find(r => r.date === today && r.employee_name === user.name);
+    setTodayRecord(rec || null);
+    if (rec && rec.clock_in && !rec.clock_out) {
+      const { data: brk } = await supabase.from("breaks").select("*").eq("attendance_id", rec.id).is("break_end", null).maybeSingle();
+      setActiveBreak(brk || null);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const clockIn = async () => {
+    setSaving(true);
+    const { data } = await supabase.from("attendance").insert({
+      employee_name: user.name, date: today,
+      clock_in: new Date().toISOString(), nfc_code: nfcCode
+    }).select().single();
+    setTodayRecord(data);
+    await load();
+    setSaving(false);
+  };
+
+  const clockOut = async () => {
+    if (!todayRecord) return;
+    setShowSummaryModal(true);
+  };
+
+  const confirmClockOut = async () => {
+    setSaving(true);
+    const now = new Date().toISOString();
+    const hours = calcHours(todayRecord.clock_in, now);
+    await supabase.from("attendance").update({
+      clock_out: now,
+      total_hours: hours,
+      day_summary: dayNote
+    }).eq("id", todayRecord.id);
+    setShowSummaryModal(false);
+    setDayNote("");
+    await load();
+    setSaving(false);
+  };
+
+  const startBreak = async () => {
+    if (!todayRecord) return;
+    setSaving(true);
+    const { data } = await supabase.from("breaks").insert({
+      attendance_id: todayRecord.id,
+      break_start: new Date().toISOString()
+    }).select().single();
+    setActiveBreak(data);
+    setSaving(false);
+  };
+
+  const endBreak = async () => {
+    if (!activeBreak) return;
+    setSaving(true);
+    const now = new Date().toISOString();
+    const mins = ((new Date(now) - new Date(activeBreak.break_start)) / 60000).toFixed(0);
+    await supabase.from("breaks").update({
+      break_end: now, duration_minutes: mins
+    }).eq("id", activeBreak.id);
+    setActiveBreak(null);
+    setSaving(false);
+  };
+
+  const filteredAttendance = isAdmin && filterName !== "All"
+    ? attendance.filter(r => r.employee_name === filterName)
+    : attendance;
+
+  const statusColor = (rec) => {
+    if (!rec.clock_in) return "#6b7280";
+    if (!rec.clock_out) return "#F5C518";
+    return "#22c55e";
+  };
+
+  const statusLabel = (rec) => {
+    if (!rec.clock_in) return "Absent";
+    if (!rec.clock_out) return "At Work";
+    return `${rec.total_hours}h`;
+  };
+
+  if (loading) return <Spinner />;
+
+  const isClockedIn = todayRecord?.clock_in && !todayRecord?.clock_out;
+  const isClockedOut = todayRecord?.clock_out;
+
+  return (
+    <div className="fade-in">
+      {/* TODAY'S STATUS - Employee View */}
+      {!isAdmin && (
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ background: "#141414", border: "1px solid #1e1e1e", borderRadius: 16, padding: 24, marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 20 }}>
+              <div style={{ width: 12, height: 12, borderRadius: "50%", background: isClockedIn ? "#22c55e" : isClockedOut ? "#8B2FC9" : "#333", boxShadow: isClockedIn ? "0 0 8px #22c55e" : "none" }} />
+              <span style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, color: "#ddd", letterSpacing: 2 }}>
+                {isClockedIn ? "YOU'RE AT WORK" : isClockedOut ? "DAY COMPLETED" : "NOT CLOCKED IN"}
+              </span>
+              <span style={{ marginLeft: "auto", color: "#555", fontSize: 13 }}>{fmtDate(today)}</span>
+            </div>
+
+            {todayRecord && (
+              <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 20 }}>
+                <div style={{ background: "#0d0d0d", borderRadius: 10, padding: "12px 16px", flex: 1, minWidth: 100 }}>
+                  <div style={{ color: "#555", fontSize: 10, letterSpacing: 1, marginBottom: 4 }}>CLOCK IN</div>
+                  <div style={{ color: "#22c55e", fontFamily: "'Bebas Neue', sans-serif", fontSize: 22 }}>{fmt(todayRecord.clock_in)}</div>
+                </div>
+                {todayRecord.clock_out && (
+                  <div style={{ background: "#0d0d0d", borderRadius: 10, padding: "12px 16px", flex: 1, minWidth: 100 }}>
+                    <div style={{ color: "#555", fontSize: 10, letterSpacing: 1, marginBottom: 4 }}>CLOCK OUT</div>
+                    <div style={{ color: "#ef4444", fontFamily: "'Bebas Neue', sans-serif", fontSize: 22 }}>{fmt(todayRecord.clock_out)}</div>
+                  </div>
+                )}
+                {todayRecord.total_hours && (
+                  <div style={{ background: "#0d0d0d", borderRadius: 10, padding: "12px 16px", flex: 1, minWidth: 100 }}>
+                    <div style={{ color: "#555", fontSize: 10, letterSpacing: 1, marginBottom: 4 }}>TOTAL HOURS</div>
+                    <div style={{ color: "#8B2FC9", fontFamily: "'Bebas Neue', sans-serif", fontSize: 22 }}>{todayRecord.total_hours}h</div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {!todayRecord && (
+                <button onClick={clockIn} disabled={saving}
+                  style={{ flex: 1, background: "linear-gradient(135deg, #22c55e, #16a34a)", color: "#fff", border: "none", borderRadius: 12, padding: "14px", fontSize: 15, fontWeight: 700, fontFamily: "'Bebas Neue', sans-serif", letterSpacing: 2 }}>
+                  {saving ? "..." : "🟢 CLOCK IN"}
+                </button>
+              )}
+              {isClockedIn && !activeBreak && (
+                <>
+                  <button onClick={startBreak} disabled={saving}
+                    style={{ flex: 1, background: "#F5C51822", color: "#F5C518", border: "1px solid #F5C51844", borderRadius: 12, padding: "14px", fontSize: 15, fontWeight: 700, fontFamily: "'Bebas Neue', sans-serif", letterSpacing: 2 }}>
+                    {saving ? "..." : "☕ START BREAK"}
+                  </button>
+                  <button onClick={clockOut} disabled={saving}
+                    style={{ flex: 1, background: "linear-gradient(135deg, #ef4444, #dc2626)", color: "#fff", border: "none", borderRadius: 12, padding: "14px", fontSize: 15, fontWeight: 700, fontFamily: "'Bebas Neue', sans-serif", letterSpacing: 2 }}>
+                    🔴 CLOCK OUT
+                  </button>
+                </>
+              )}
+              {isClockedIn && activeBreak && (
+                <button onClick={endBreak} disabled={saving}
+                  style={{ flex: 1, background: "linear-gradient(135deg, #F5C518, #d97706)", color: "#111", border: "none", borderRadius: 12, padding: "14px", fontSize: 15, fontWeight: 700, fontFamily: "'Bebas Neue', sans-serif", letterSpacing: 2 }}>
+                  {saving ? "..." : "▶ END BREAK"}
+                </button>
+              )}
+            </div>
+
+            {activeBreak && (
+              <div style={{ marginTop: 12, background: "#F5C51810", border: "1px solid #F5C51830", borderRadius: 10, padding: "10px 14px", color: "#F5C518", fontSize: 13 }}>
+                ☕ On break since {fmt(activeBreak.break_start)}
+              </div>
+            )}
+
+            {todayRecord?.day_summary && (
+              <div style={{ marginTop: 12, background: "#8B2FC910", border: "1px solid #8B2FC930", borderRadius: 10, padding: "10px 14px" }}>
+                <div style={{ color: "#8B2FC9", fontSize: 11, fontWeight: 700, letterSpacing: 1, marginBottom: 4 }}>TODAY'S SUMMARY</div>
+                <div style={{ color: "#ccc", fontSize: 13 }}>{todayRecord.day_summary}</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ADMIN STATS */}
+      {isAdmin && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 14, marginBottom: 24 }}>
+          {[
+            ["Present Today", attendance.filter(r => r.date === today && r.clock_in).length, "#22c55e"],
+            ["At Work", attendance.filter(r => r.date === today && r.clock_in && !r.clock_out).length, "#F5C518"],
+            ["Left", attendance.filter(r => r.date === today && r.clock_out).length, "#8B2FC9"],
+            ["Total Records", attendance.length, "#6b7280"],
+          ].map(([l, v, c]) => (
+            <div key={l} style={{ background: "#141414", border: `1px solid ${c}22`, borderRadius: 14, padding: "18px 16px" }}>
+              <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 32, color: c }}>{v}</div>
+              <div style={{ color: "#555", fontSize: 12, marginTop: 4 }}>{l}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* FILTER */}
+      {isAdmin && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 18, alignItems: "center" }}>
+          <span style={{ color: "#555", fontSize: 11, fontWeight: 700, letterSpacing: 1 }}>FILTER:</span>
+          <select value={filterName} onChange={e => setFilterName(e.target.value)} style={{ ...sel, width: "auto" }}>
+            <option value="All">All Employees</option>
+            {EMPLOYEES.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+      )}
+
+      {/* ATTENDANCE RECORDS */}
+      <div style={{ color: "#555", fontSize: 11, fontWeight: 700, letterSpacing: 1, marginBottom: 14 }}>
+        {isAdmin ? "TEAM ATTENDANCE" : "MY ATTENDANCE HISTORY"}
+      </div>
+      {filteredAttendance.length === 0 ? (
+        <div style={{ background: "#0d0d0d", border: "1px dashed #1a1a1a", borderRadius: 12, padding: 32, textAlign: "center", color: "#333" }}>
+          No attendance records yet
+        </div>
+      ) : (
+        filteredAttendance.map(rec => (
+          <div key={rec.id} style={{ background: "#141414", border: "1px solid #1e1e1e", borderRadius: 12, padding: "14px 18px", marginBottom: 10, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <div style={{ width: 10, height: 10, borderRadius: "50%", background: statusColor(rec), flexShrink: 0 }} />
+            {isAdmin && <Avatar name={rec.employee_name} size={32} />}
+            <div style={{ flex: 1, minWidth: 120 }}>
+              {isAdmin && <div style={{ fontWeight: 700, color: "#ddd", fontSize: 14 }}>{rec.employee_name}</div>}
+              <div style={{ color: "#555", fontSize: 12 }}>{fmtDate(rec.date)}</div>
+            </div>
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ textAlign: "center" }}>
+                <div style={{ color: "#444", fontSize: 10, letterSpacing: 1 }}>IN</div>
+                <div style={{ color: "#22c55e", fontSize: 14, fontFamily: "'Bebas Neue', sans-serif" }}>{fmt(rec.clock_in)}</div>
+              </div>
+              <div style={{ textAlign: "center" }}>
+                <div style={{ color: "#444", fontSize: 10, letterSpacing: 1 }}>OUT</div>
+                <div style={{ color: "#ef4444", fontSize: 14, fontFamily: "'Bebas Neue', sans-serif" }}>{fmt(rec.clock_out)}</div>
+              </div>
+              <Badge label={statusLabel(rec)} color={statusColor(rec)} />
+            </div>
+            {rec.day_summary && (
+              <div style={{ width: "100%", marginTop: 8, background: "#0d0d0d", borderRadius: 8, padding: "8px 12px", color: "#888", fontSize: 12, lineHeight: 1.5 }}>
+                📝 {rec.day_summary}
+              </div>
+            )}
+          </div>
+        ))
+      )}
+
+      {/* Clock Out + Day Summary Modal */}
+      {showSummaryModal && (
+        <Modal onClose={() => setShowSummaryModal(false)} width={480}>
+          <div style={{ padding: 28 }}>
+            <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 24, color: "#f0f0f0", letterSpacing: 2, marginBottom: 8 }}>🔴 CLOCK OUT</h2>
+            <p style={{ color: "#555", fontSize: 13, marginBottom: 24 }}>Before you leave, tell us what you accomplished today.</p>
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ color: "#555", fontSize: 11, fontWeight: 700, display: "block", marginBottom: 8, letterSpacing: 1 }}>WHAT DID YOU DO TODAY? *</label>
+              <textarea value={dayNote} onChange={e => setDayNote(e.target.value)}
+                placeholder="e.g. Completed the client logo revisions, attended standup, worked on Instagram posts for NOK campaign..."
+                rows={4} style={{ ...inp, resize: "vertical" }} />
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setShowSummaryModal(false)} style={{ flex: 1, background: "#1e1e1e", color: "#888", border: "1px solid #2a2a2a", borderRadius: 10, padding: 12, fontSize: 14, fontWeight: 700 }}>Cancel</button>
+              <button onClick={confirmClockOut} disabled={!dayNote.trim() || saving}
+                style={{ flex: 2, background: !dayNote.trim() ? "#333" : "linear-gradient(135deg, #ef4444, #dc2626)", color: "#fff", border: "none", borderRadius: 10, padding: 12, fontSize: 14, fontWeight: 700, fontFamily: "'Bebas Neue', sans-serif", letterSpacing: 1 }}>
+                {saving ? "SAVING..." : "CONFIRM CLOCK OUT ✓"}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [user, setUser] = useState(null);
@@ -442,13 +728,12 @@ export default function App() {
   const [filterPriority, setFilterPriority] = useState("All");
   const [search, setSearch] = useState("");
 
-  // Auth check
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       if (data.session) {
         const email = data.session.user.email;
         const member = TEAM.find(t => t.name.toLowerCase().replace(/\s/g, "") === email.split("@")[0].toLowerCase().replace(/\s/g, ""));
-        setUser({ email, name: member?.name || email.split("@")[0], isAdmin: member?.isAdmin || false });
+        setUser({ email, name: member?.name || email.split("@")[0], isAdmin: member?.isAdmin || false, dept: member?.dept || "" });
       }
       setLoading(false);
     });
@@ -511,6 +796,12 @@ export default function App() {
     return true;
   });
 
+  const VIEWS = [
+    { key: "tasks", label: "TASKS" },
+    { key: "attendance", label: "ATTENDANCE" },
+    { key: "summary", label: "WEEKLY SUMMARY" },
+  ];
+
   return (
     <>
       <style>{CSS}</style>
@@ -520,14 +811,14 @@ export default function App() {
           <div style={{ background: "#F5C518", borderRadius: 8, padding: "3px 10px", marginRight: 4 }}>
             <span style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, color: "#111", letterSpacing: 2 }}>NOK</span>
           </div>
-          {["tasks", "summary"].map(v => (
-            <button key={v} onClick={() => setView(v)}
-              style={{ background: view === v ? "#8B2FC9" : "transparent", color: view === v ? "#fff" : "#555", border: "none", borderRadius: 8, padding: "6px 14px", fontSize: 13, fontWeight: 700, fontFamily: "'Bebas Neue', sans-serif", letterSpacing: 1, transition: "all 0.2s" }}>
-              {v === "tasks" ? "TASKS" : "WEEKLY SUMMARY"}
+          {VIEWS.map(v => (
+            <button key={v.key} onClick={() => setView(v.key)}
+              style={{ background: view === v.key ? "#8B2FC9" : "transparent", color: view === v.key ? "#fff" : "#555", border: "none", borderRadius: 8, padding: "6px 14px", fontSize: 13, fontWeight: 700, fontFamily: "'Bebas Neue', sans-serif", letterSpacing: 1, transition: "all 0.2s" }}>
+              {v.label}
             </button>
           ))}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
-            {isAdmin && (
+            {isAdmin && view === "tasks" && (
               <button onClick={() => setShowNewTask(true)}
                 style={{ background: "linear-gradient(135deg, #8B2FC9, #6a1fa0)", color: "#fff", border: "none", borderRadius: 10, padding: "7px 16px", fontSize: 13, fontWeight: 700, fontFamily: "'Bebas Neue', sans-serif", letterSpacing: 1 }}>
                 + ASSIGN TASK
@@ -593,6 +884,7 @@ export default function App() {
               })}
             </>
           )}
+          {view === "attendance" && <AttendanceView user={user} isAdmin={isAdmin} />}
           {view === "summary" && <WeeklySummary tasks={isAdmin ? tasks : tasks.filter(t => t.assignee_name === user.name)} />}
         </div>
 
